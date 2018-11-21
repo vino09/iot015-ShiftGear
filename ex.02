@@ -1,0 +1,83 @@
+package com.inatel.demos;
+
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.flink.api.common.functions.*;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer09;
+import org.apache.flink.streaming.util.serialization.JSONDeserializationSchema;
+import org.apache.flink.util.Collector;
+
+import java.util.Properties;
+
+public class GearShift {
+
+    private static String Car = "2";
+
+    public static void main(String[] args) throws Exception {
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        Properties properties = new Properties();
+        properties.setProperty("bootstrap.servers", "localhost:9092");
+        properties.setProperty("group.id", "flink_consumer");
+
+        DataStream stream = env.addSource(
+                new FlinkKafkaConsumer09<>("flink-demo", new JSONDeserializationSchema(), properties));
+
+        stream.flatMap(new TelemetryJsonParser())
+              .keyBy(0)
+              .timeWindow(Time.seconds(3))
+              .reduce(new CheckGearReduce())
+              .map(new GearPrinter())
+              .print();
+
+        env.execute();
+    }
+
+    static class TelemetryJsonParser implements FlatMapFunction<ObjectNode, Tuple2<Integer, Integer>> {
+
+        @Override
+        public void flatMap(ObjectNode jsonTelemetry, Collector<Tuple2<Integer, Integer>> out) throws Exception {
+
+            String carNumber = jsonTelemetry.get("Car").asText();
+            if (carNumber.equals(Car)) {
+                int gear = jsonTelemetry.get("telemetry").get("Gear").intValue();
+                out.collect(new Tuple2<>(gear, 0));
+            }
+
+        }
+
+    }
+
+    static class CheckGearReduce implements ReduceFunction<Tuple2<Integer, Integer>> {
+
+        private static Integer lastGear;
+
+        @Override
+        public Tuple2<Integer, Integer> reduce(Tuple2<Integer, Integer> value1,
+                                               Tuple2<Integer, Integer> value2) {
+
+            if (!value1.f0.equals(lastGear)) {
+                lastGear = value1.f0;
+                return new Tuple2<>(value1.f0, value1.f1 + 1);
+            }
+
+            return new Tuple2<>(value1.f0, value1.f1);
+        }
+
+    }
+
+    static class GearPrinter implements MapFunction<Tuple2<Integer, Integer>, String> {
+
+        @Override
+        public String map(Tuple2<Integer, Integer> gearShiftEntry) throws Exception {
+
+            return String.format("Car%s: %d", Car, gearShiftEntry.f1);
+        }
+
+    }
+
+}
